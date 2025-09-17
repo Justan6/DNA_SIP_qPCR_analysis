@@ -1,0 +1,162 @@
+---
+title: "DNA SIP qPCR analysis"
+author: "Justus Nweze"
+date: "2023-08-02"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r libraries, include=F}
+# Load required libraries
+library(ggplot2)
+library(dplyr)
+library(purrr)  
+library(extrafont) # Tools for using fonts, CRAN v0.17
+library(tidyverse) # Easily Install and Load the 'Tidyverse', CRAN v1.3.0 
+library(patchwork) # The Composer of Plots, CRAN v1.0.1
+library(scales) # Scale Functions for Visualization, CRAN v1.1.1
+library(ggtext) # Improved Text Rendering Support for 'ggplot2', CRAN v0.1.0
+library(see) # Visualisation Toolbox for 'easystats' and Extra Geoms, Themes and Color Palettes for 'ggplot2', CRAN v0.6.0
+library(dplyr)
+```
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+## load file containing RI of each fractions and convert it to density using previously prepare standards
+```{r load density data, cache=T}
+# Change the current working directory to the specified path
+setwd("/home/justus/Documents/Peat_incubation_SIP_New/qPCR2")
+
+# Read the CSV file containing density of the fractions
+read_csv("1.RI_DNA_SIP_frac.csv") %>% 
+  # Filter the data to include only fractions numbered between 2 and 11
+  #filter(Fraction_no. > 1 & Fraction_no. < 12) %>%
+  # Transform the data from wide to long format
+  pivot_longer(!"Fraction_no.", names_to = "Sample", values_to = "RI") %>%
+  # Optionally, filter out specific samples (commented out for now)
+  # filter(!(Sample %in% c("C4", "C5", "D4", "D5"))) %>%  
+  # Calculate the density using the given formula and create a new column 'Density'
+  mutate(Density = (10.68037 * RI) - 13.28621) ->
+  # Assign the resulting data frame to the variable SIP_Density
+  SIP_Density
+
+```
+
+
+### Load qPCR data
+
+```{r load qPCR data, cache=T}
+# Read the CSV file containing qPCR data
+qPCR_data <- read_csv("2.qPCR_data_DNA_SIP_frac.csv") %>% 
+  # Step 1: Remove rows with an empty "Sample Name"
+  filter(!is.na(`Sample Name`) & `Sample Name` != "") %>%
+  # Step 2: Separate the "Sample Name" column into "Sample" and "Fraction_no."
+  separate(`Sample Name`, into = c("Sample", "Fraction_no."), sep = "_", convert = TRUE, remove = FALSE)
+
+# View the cleaned-up data
+print(qPCR_data)
+
+# Load the data that contains information about the SIP treatments
+Treatments <- read_csv("3.Treatments.csv") #%>%
+  # Optionally, filter out specific samples (commented out for now)
+  #filter(!(Sample %in% c("J2", "J3", "F2", "E3", "E4")))  
+
+# Merge qPCR data and the SIP metadata
+qPCR_Treatments <- qPCR_data %>%
+  # Perform an inner join with the Treatments data by "Sample"
+  inner_join(Treatments, by = "Sample") %>%
+  # Perform an inner join with the Density data by "Fraction_no." and "Sample"
+  inner_join(SIP_Density, by = c("Fraction_no.", "Sample")) ->
+  # Assign the resulting data frame to the variable qPCR_Treatments
+  qPCR_Treatments
+```
+
+
+
+```{r qPCR data manipulations}
+
+# Load qPCR data and perform necessary data manipulations
+
+# Create a new data frame 'qPCR_Treatments_cleaned' by applying data transformations to 'qPCR_Treatments'
+qPCR_Treatments_cleaned <- qPCR_Treatments %>%
+  
+  # Remove rows with missing values in the 'Quantity Mean' column
+  drop_na(`Quantity`) %>%
+  
+  # Group the data by multiple variables: Sample, Fraction_no., Density, and Soil_Treatment
+  group_by(Sample, Fraction_no., Density, Soil_Treatment) %>% 
+  
+  # Calculate summary statistics for each group
+  summarise(
+    `Mean copy numbers` = scientific(mean(`Quantity`*7.5), digits = 2),  # Mean copy numbers with scientific notation, 7.5 was the dilution factor for the DNA used for qPCR
+    StD = scientific(sd(`Quantity`), digits = 2),                    # Standard deviation with scientific notation
+    n = n(),                                                         # Count of observations
+    SE = scientific(sd(`Quantity`) / sqrt(n()), digits = 2)          # Standard error with scientific notation
+  ) %>%
+  
+  # Group the data again by 'Sample'
+  group_by(Sample) %>%
+  
+  # Calculate relative fractions and uncertainty bounds
+  mutate(
+    `Rel. fraction` = as.numeric(`Mean copy numbers`) / sum(as.numeric(`Mean copy numbers`)),  # Relative fraction
+    `frac.min` = (as.numeric(`Mean copy numbers`) - as.numeric(SE)) / sum(as.numeric(`Mean copy numbers`)),  # Lower bound of fraction
+    `frac.max` = (as.numeric(`Mean copy numbers`) + as.numeric(SE)) / sum(as.numeric(`Mean copy numbers`))   # Upper bound of fraction
+  ) ->
+  
+  # Store the final summarized and transformed data in 'means'
+  means
+
+# Export the 'means' data frame to a CSV file
+write.csv(means, file = "qPCR_means.csv", row.names = FALSE)
+
+
+```
+
+
+
+
+
+
+
+```{r}
+# Define pairs of samples based on the given pattern
+sample_pairs <- list(c("E1", "E2", "F1"), c("E3", "E4", "F1"), c("I1", "I2", "J1"), c("I3", "I4", "J1"))
+
+# Loop through each sample pair and create combined plots
+for (pair in sample_pairs) {
+  # Filter data for the current sample pair
+  filtered_means <- means[means$Sample %in% pair, ]
+  
+  # Create the ggplot visualization
+  Mean_plot <- ggplot(filtered_means, aes(x = Density, y = `Rel. fraction`, group = Sample)) +
+    geom_point(size = 5) +  # Add points to the plot
+    geom_path(linewidth = 2) +  # Add lines to connect the points
+    xlab(expression(paste("Density ", "(g ", ml^-1, ")"))) +  # Label for x-axis with proper formatting
+    ylab("16S rDNA copies (of total)") +  # Label for y-axis
+    theme(
+      panel.grid = element_blank(),  # Remove grid lines from the panel
+      axis.line = element_line(linewidth = 1.2),  # Make the axis lines thicker
+      axis.text = element_text(size = 25),  # Increase the size of axis text
+      axis.ticks = element_line(size = 3),  # Make the axis ticks thicker
+      panel.border = element_blank(),  # Remove the panel border
+      text = element_text(size = 25),  # Increase the size of all text elements
+      panel.background = element_rect(fill = "white", colour = "grey50")  # Set background color and border of the panel
+    )
+  
+  # Create a combined plot for the current pair, separated by Soil Treatment
+  combined_plot <- Mean_plot + facet_wrap(~ Sample, ncol = 2)
+  
+  # Save the combined plot as a PDF file with the pair names
+  pdf_file_name <- paste0(pair[1], "_", pair[2], ".pdf")
+  pdf(pdf_file_name, width = 30, height = 10)
+  print(combined_plot)  # Print the plot to the PDF file
+  dev.off()  # Close the PDF device
+}
+
+
+```
